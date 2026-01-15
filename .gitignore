@@ -1,0 +1,67 @@
+# Binaries / build outputs
+bin/
+build/
+dist/
+out/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go coverage / profiling
+coverage.out
+coverage.html
+*.cover
+*.prof
+*.pprof
+cpu.out
+mem.out
+
+# Go workspace / vendoring
+go.work
+go.work.sum
+vendor/
+
+# Dependency/cache dirs
+.gocache/
+.gomodcache/
+
+# Generated files
+*.generated.go
+*_generated.go
+
+# Logs
+*.log
+logs/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.secret
+secrets/
+config.local.*
+config.*.local
+
+# IDEs / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Docker / local runtime
+docker-compose.override.yml
+tmp/
+temp/
+
+# Test artifacts
+testdata/output/
+testdata/tmp/
+
+# OS files
+Thumbs.db

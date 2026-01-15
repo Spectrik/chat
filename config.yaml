@@ -1,19 +1,18 @@
 transport:
-  - type: "tcp"
-    port: 9000
-
-  - type: "tls"
-    port: 9001
-    cert_file: "server.crt"
-    key_file: "server.key"
+  type: "tls"
+  address: "localhost:9001"
+  cert_file: "internal/config/server.crt"
+  key_file: "internal/config/server.key"
 
 chat:
+  max_rooms: 10
   rooms:
     - name: "general"
-      capacity: 100
-      description: "General chat room"
-      password: "password123"
+      policies:
+        capacity: 100
+        password: "password123"
+        userlevel: 2
     - name: "jebacka"
-      capacity: 10
-      description: "jebacka chat room"
-      password: "password123"
+      policies:
+        capacity: 2
+        password: "frnda"

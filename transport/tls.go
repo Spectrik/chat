@@ -17,7 +17,7 @@ func NewTLSTransport(c *tls.Conn) *TLSTransport {
     sc.Buffer(make([]byte, 1024), 1024*1024)
 
     return &TLSTransport{
-        conn:    c,
+        conn: c,
         sc: sc,
         w:  bufio.NewWriter(c),
     }

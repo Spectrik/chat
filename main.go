@@ -1,47 +1,77 @@
 package main
 
-// Heslo muzou mit jen permanent roomky
-// Banlist maj jenom permanent roomky
-// Jak jednoznacne identifikovat clienta?
-// IP basic
-// Registrace + login (moc prace na to ted) + anonymni pristup konfigurace
-// RBAC (moc prace na to ted)
-// Logovani
+// Historie zprav v roomkach
 // Ruzne typy pripojeni (websocket, nc, ...). + TLS
-// Databaze
-// Roomky v databazi
-// User permissions
-// Uzivatele + hesla
+// Implementace databaze
+//   Roomky v databazi
+//   Uzivatele v databazi
+//   Banlisty v databazi
 // Banlisty
-// Konfigurace z yamlu
+// Barevny text
+// Format zprav v konfigu
+// logovani
+// Nastudovat atomic
+// Predelat radne adresarovou strukturu
+// Dodelat dalsi user role?
+// Vyjebat context do riti kde neni potreba
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
+	"os"
 	"time"
 
-	chat "github.com/ondrej/chat/chat"
-	chatconfig "github.com/ondrej/chat/config"
-	transport "github.com/ondrej/chat/transport"
+	"github.com/ondrej/chat/client"
+	"github.com/ondrej/chat/clientregistry"
+	"github.com/ondrej/chat/commands"
+	"github.com/ondrej/chat/internal/app"
+	"github.com/ondrej/chat/internal/authz"
+	chatconfig "github.com/ondrej/chat/internal/config"
+	"github.com/ondrej/chat/internal/store/filestore"
+	"github.com/ondrej/chat/room"
+	"github.com/ondrej/chat/room/policies"
+	"github.com/ondrej/chat/roommanager"
+	"github.com/ondrej/chat/transport"
 )
 
+var log = slog.Default().With("component", "main")
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	config, err := chatconfig.LoadConfig("config.yaml")
+
 	if err != nil {
-		log.Fatal("Failed to load config:", err)
+		log.Error("Failed to load config:", err)
 	}
 
-	ln, err := net.Listen(config.Transport.Type, config.Transport.Port)
+	// Define all the deps required for run
+	store, err := filestore.NewFileStore("internal/config/userdb.txt")
 	if err != nil {
-		log.Fatal(err)
+		log.Error("Failed to load user database from file", err)
+	}
+
+	reg := commands.NewRegistry()
+	commands.RegisterAll(reg)
+
+	ctx := context.TODO()
+	authn := filestore.NewService(store)
+    authz := authz.NewService()
+	cr := clientregistry.NewRegistry(store)
+	rm := roommanager.NewRoomManager()
+
+	app := app.NewApp(rm, authn, authz, cr)
+
+	ln, err := net.Listen("tcp", config.Transport.Address)
+	if err != nil {
+		log.Error("Server listener start failed", err)
 	}
 
 	if config.Transport.Type == "tls" {
 		cert, err := config.Certificate()
 		if err != nil {
-			log.Fatal(err)
+			panic("Certificate load failed")
 		}
 
 		ln = tls.NewListener(ln, &tls.Config{
@@ -49,18 +79,26 @@ func main() {
 		})
 
 		if err != nil {
-			log.Fatal(err)
+			log.Error("TLS server listener start failed", err)
 		}
 	}
 
 	defer ln.Close()
 
-	log.Println("Chat server listening on", config.Transport.Port)
-
-
-	rm := chat.NewRoomManager()
-	rm.LoadRoomsFromConfig(config.Chat)
+	log.Info("Chat server listening.", "address", config.Transport.Address)
 	go rm.Run()
+
+	// load rooms from config
+	for _, rc := range config.Chat.Rooms {
+    	pols, _ := chatconfig.BuildPolicies(rc.Policies)
+    	err := app.CreateRoomNoAuth(ctx, rc.Name, pols)
+
+		if err != nil {
+			log.Error("Room failed to create!", err)
+		}
+	}
+	policy := room.FromPolicies(policies.DefaultPolicies()).WithJoin(policies.PasswordPolicy{Password: "password123"}).Build()
+	app.CreateRoomNoAuth(ctx, "testroom", &policy)
 	janitorCloser := rm.StartJanitor(5 * time.Second)
 
 	defer janitorCloser()
@@ -73,78 +111,74 @@ func main() {
 		}
 
 		adapter := transport.NewTCPTransport(conn)
-		go handleConn(adapter, rm)
+		go handleConn(adapter, app, reg)
 	}
 }
 
-func handleConn(conn transport.Transport, rm *chat.RoomManager) {
+func handleConn(conn transport.Transport, app *app.App, reg *commands.Registry) {
 	defer conn.Close()
 
 	conn.Write("Hello there! Welcome to the chat server.")
 	conn.Write("Enter your name:")
 
 	name, _ := conn.Read()
-	name = trimNL(name)
+	cr := app.CR
 
-	if name == "" {
-		name = conn.RemoteAddr()
+	for {
+		if err := cr.ValidateUsername(name); err != nil {
+			conn.Write(err.Error() + "\n")
+			conn.Write("Enter your name:")
+			name, _ = conn.Read()
+			continue
+		}
+	break
 	}
 
-	client := chat.NewClient(conn, name)
+	cl := client.NewClient(conn, name)
+	cr.Register(cl)
 
-	// writer goroutine
-	done := make(chan struct{})
+	// client writer goroutine
 	go func() {
-		for msg := range client.Out {
-			conn.Write(msg)
+		for {
+			select {
+			case <-cl.Done():
+				return
+			case msg := <-cl.Out:
+				err := conn.Write(msg)
+				if err != nil {
+					cl.Close()
+					return
+				}
+			}
 		}
-		close(done)
 	}()
 
 	defer func() {
-		rm.Disconnect(client)
-		close(client.Out)
-		<-done
+		cl.Close()
+		app.Disconnect(cl)
+		cr.Unregister(cl)
 	}()
 
-	chat.HelpMessage(client.Out)
-
+	cl.Send(reg.HelpText())
 	for {
 		line, err := conn.Read()
 		if err != nil {
-			break // disconnect
+			break
 		}
 
 		if line == "" {
 			continue
 		}
 
-		if cmd, ok := chat.ParseCommand(line); ok {
-			handler, exists := chat.Commands[cmd.Name]
-			if !exists {
-				client.Out <- "Unknown command. Try /help"
-				continue
-			}
+		if cmd, ok := commands.ParseCommand(line); ok {
+			reg.Dispatch(cl, app, cmd)
 
-			handler(client, rm, cmd)
-			if client.Quit {
-				client.Out <- fmt.Sprintf("Bye bye %s!", client.Name)
+			if cl.Quit {
+				cl.Send(fmt.Sprintf("Bye bye %s!", cl.ClientName()))
+				cl.Close()
 				return
 			}
 			continue
 		}
 	}
-}
-
-func trimNL(s string) string {
-	for len(s) > 0 {
-		last := s[len(s)-1]
-		if last == '\n' || last == '\r' {
-			s = s[:len(s)-1]
-			continue
-		}
-		break
-	}
-
-	return s
 }
